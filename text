@@ -1,0 +1,11 @@
+Enabling clear visibility, control, and risk awareness of S3 buckets and their permissions.
+
+At CCR, as we onboard more tenants to our AWS accounts, managing and understanding access to hundreds of S3 buckets has become increasingly critical for both security and operational efficiency.
+
+The COPE team needs a centralized, human-friendly view of bucket permissions, associated risks, and usage patterns to support governance and operational excellence.
+
+Reviewing and maintaining cross-account access granted across multiple tenants is essential to ensure relevance and minimize unnecessary exposure.
+
+Automating insights into bucket configurations saves time, reduces manual errors, and enhances the tenant experience by providing actionable, up-to-date information.
+
+Empowering platform teams and tenants with key S3 metrics — such as bucket size, object count, lifecycle policies, versioning status, encryption configuration, storage class distribution, and replication status — helps drive better cost control, risk mitigation, and informed decision-making.
