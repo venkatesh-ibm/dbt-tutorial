@@ -13,3 +13,15 @@ Empowering platform teams and tenants with key S3 metrics — such as bucket siz
 As CCR onboards more tenants to shared AWS accounts, managing and understanding access to hundreds of S3 buckets is increasingly complex and critical.
 
 Platform and tenant teams lack a centralized, human-friendly view of bucket permissions, risks, and key metrics — making it hard to review cross-account access, control costs, and maintain governance effectively.
+
+proposed:
+We implement an automated pipeline that fetches S3 bucket policies and relevant bucket metrics daily using an AWS Glue job. The bucket policies and metrics are processed and sent to a GenAI model, which generates human-friendly JSON summaries and detailed insights. These outputs are saved in a dedicated S3 bucket.
+
+To optimize processing, bucket policies are only reprocessed and sent to the model when a hash comparison detects changes from the previous day. The hash values are stored securely (e.g., in DynamoDB or an S3 metadata store) to enable this efficient change detection.
+
+The generated JSON outputs are synced with an S3 knowledge base, which creates embeddings from the data and stores them in a vector database. This enables fast, semantic search and conversational querying through the GenAI-powered user interface.
+
+Additionally, an Athena table is created over the structured JSON data in the output bucket, enabling visualization and reporting through tools like Tableau.
+
+This solution provides a scalable, cost-efficient, and user-friendly way to maintain continuous visibility, risk assessment, and governance of S3 buckets for platform teams and tenants.
+
