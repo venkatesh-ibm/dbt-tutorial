@@ -25,3 +25,54 @@ Additionally, an Athena table is created over the structured JSON data in the ou
 
 This solution provides a scalable, cost-efficient, and user-friendly way to maintain continuous visibility, risk assessment, and governance of S3 buckets for platform teams and tenants.
 
+
+Sample Questions for the S3 Risk & Governance Monitoring GenAI:
+Bucket Access & Permissions
+
+Which buckets have cross-account full access?
+
+Are there any buckets with public read or write permissions?
+
+Show me all buckets accessible by account ID XYZ.
+
+List buckets with permissions granted via ACLs versus bucket policies.
+
+Risk & Compliance
+
+Which buckets are currently flagged as high risk and why?
+
+Are there any buckets with unencrypted data or no versioning enabled?
+
+What buckets have lifecycle policies that could cause data loss?
+
+Bucket Metadata & Usage
+
+What is the total size and object count of bucket ABC?
+
+Show buckets that are using intelligent tiering or Glacier storage class.
+
+Which buckets are integrated with Starburst or prepared for analytics?
+
+Cross-account and Governance
+
+List all buckets with cross-account access and the respective principals.
+
+Which buckets have permissions that haven’t changed in the last 30 days?
+
+Are there buckets with deprecated or unnecessary permissions?
+
+Operational & Cost Insights
+
+Which buckets have the largest data volume growth this month?
+
+Show buckets with lifecycle rules that could reduce costs.
+
+What is the distribution of storage classes across all buckets?
+
+General Queries
+
+Summarize the overall security posture of all buckets.
+
+Provide a human-readable summary of bucket ABC’s permissions and risks.
+
+What are the common reasons for risk flagged buckets?
