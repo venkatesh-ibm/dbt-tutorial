@@ -9,3 +9,7 @@ Reviewing and maintaining cross-account access granted across multiple tenants i
 Automating insights into bucket configurations saves time, reduces manual errors, and enhances the tenant experience by providing actionable, up-to-date information.
 
 Empowering platform teams and tenants with key S3 metrics — such as bucket size, object count, lifecycle policies, versioning status, encryption configuration, storage class distribution, and replication status — helps drive better cost control, risk mitigation, and informed decision-making.
+
+As CCR onboards more tenants to shared AWS accounts, managing and understanding access to hundreds of S3 buckets is increasingly complex and critical.
+
+Platform and tenant teams lack a centralized, human-friendly view of bucket permissions, risks, and key metrics — making it hard to review cross-account access, control costs, and maintain governance effectively.
