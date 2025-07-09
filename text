@@ -1,78 +1,32 @@
-Enabling clear visibility, control, and risk awareness of S3 buckets and their permissions.
+1. Access & Permissions
+Identify buckets with cross-account access and list the respective principals.
 
-At CCR, as we onboard more tenants to our AWS accounts, managing and understanding access to hundreds of S3 buckets has become increasingly critical for both security and operational efficiency.
-
-The COPE team needs a centralized, human-friendly view of bucket permissions, associated risks, and usage patterns to support governance and operational excellence.
-
-Reviewing and maintaining cross-account access granted across multiple tenants is essential to ensure relevance and minimize unnecessary exposure.
-
-Automating insights into bucket configurations saves time, reduces manual errors, and enhances the tenant experience by providing actionable, up-to-date information.
-
-Empowering platform teams and tenants with key S3 metrics — such as bucket size, object count, lifecycle policies, versioning status, encryption configuration, storage class distribution, and replication status — helps drive better cost control, risk mitigation, and informed decision-making.
-
-As CCR onboards more tenants to shared AWS accounts, managing and understanding access to hundreds of S3 buckets is increasingly complex and critical.
-
-Platform and tenant teams lack a centralized, human-friendly view of bucket permissions, risks, and key metrics — making it hard to review cross-account access, control costs, and maintain governance effectively.
-
-proposed:
-We implement an automated pipeline that fetches S3 bucket policies and relevant bucket metrics daily using an AWS Glue job. The bucket policies and metrics are processed and sent to a GenAI model, which generates human-friendly JSON summaries and detailed insights. These outputs are saved in a dedicated S3 bucket.
-
-To optimize processing, bucket policies are only reprocessed and sent to the model when a hash comparison detects changes from the previous day. The hash values are stored securely (e.g., in DynamoDB or an S3 metadata store) to enable this efficient change detection.
-
-The generated JSON outputs are synced with an S3 knowledge base, which creates embeddings from the data and stores them in a vector database. This enables fast, semantic search and conversational querying through the GenAI-powered user interface.
-
-Additionally, an Athena table is created over the structured JSON data in the output bucket, enabling visualization and reporting through tools like Tableau.
-
-This solution provides a scalable, cost-efficient, and user-friendly way to maintain continuous visibility, risk assessment, and governance of S3 buckets for platform teams and tenants.
-
-
-Sample Questions for the S3 Risk & Governance Monitoring GenAI:
-Bucket Access & Permissions
-
-Which buckets have cross-account full access?
-
-Are there any buckets with public read or write permissions?
-
-Show me all buckets accessible by account ID XYZ.
-
-List buckets with permissions granted via ACLs versus bucket policies.
-
-Risk & Compliance
-
-Which buckets are currently flagged as high risk and why?
-
-Are there any buckets with unencrypted data or no versioning enabled?
-
-What buckets have lifecycle policies that could cause data loss?
-
-Bucket Metadata & Usage
-
-What is the total size and object count of bucket ABC?
-
-Show buckets that are using intelligent tiering or Glacier storage class.
-
-Which buckets are integrated with Starburst or prepared for analytics?
-
-Cross-account and Governance
-
-List all buckets with cross-account access and the respective principals.
-
-Which buckets have permissions that haven’t changed in the last 30 days?
-
-Are there buckets with deprecated or unnecessary permissions?
-
-Operational & Cost Insights
-
-Which buckets have the largest data volume growth this month?
-
-Show buckets with lifecycle rules that could reduce costs.
-
-What is the distribution of storage classes across all buckets?
-
-General Queries
-
-Summarize the overall security posture of all buckets.
+Show all buckets accessible by account ID 2134235.
 
 Provide a human-readable summary of bucket ABC’s permissions and risks.
 
-What are the common reasons for risk flagged buckets?
+Summarize the overall security posture of all buckets.
+
+2. Risk & Compliance
+Highlight buckets flagged as high risk and explain why.
+
+Identify buckets with unencrypted data or no versioning enabled.
+
+Detect lifecycle policies that may lead to unintended data loss.
+
+3. Metadata & Usage
+Report total size and object count for bucket ABC.
+
+Show buckets using intelligent tiering or Glacier storage class.
+
+Identify buckets integrated with Starburst.
+
+Highlight buckets with the largest data volume growth this month.
+
+Provide a distribution of storage classes across all buckets.
+
+4. Cost Optimization & Storage
+Identify buckets with deprecated or unnecessary permissions.
+
+Show buckets with lifecycle policies that could reduce costs.
+
