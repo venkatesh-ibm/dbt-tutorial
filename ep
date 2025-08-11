@@ -2,32 +2,21 @@ import boto3
 import datetime
 
 def lambda_handler(event=None, context=None):
-    days_to_check = 45
+    days_to_check = 3
     end_time = datetime.datetime.utcnow()
     start_time = end_time - datetime.timedelta(days=days_to_check)
     period = 86400  # daily
 
     region = "eu-west-1"
-    print(f"=== Connecting to EC2 in {region} ===")
+    print(f"=== Processing region: {region} ===")
     ec2 = boto3.client('ec2', region_name=region)
     cloudwatch = boto3.client('cloudwatch', region_name=region)
 
-    print("Fetching VPC endpoints...")
-    try:
-        endpoints = ec2.describe_vpc_endpoints()
-        print(f"Raw describe_vpc_endpoints() response count: {len(endpoints.get('VpcEndpoints', []))}")
-    except Exception as e:
-        print(f"Error fetching endpoints: {e}")
-        return
+    endpoints_resp = ec2.describe_vpc_endpoints()
+    endpoints = endpoints_resp.get('VpcEndpoints', [])[:3]
+    print(f"Found {len(endpoints)} endpoints in {region} (limited to 3 for test)")
 
-    endpoints = endpoints.get('VpcEndpoints', [])[:3]
-    if not endpoints:
-        print(f"No VPC endpoints found in {region}. Exiting.")
-        return
-
-    print("Fetching VPC list...")
     vpcs = ec2.describe_vpcs()['Vpcs']
-    print(f"Found {len(vpcs)} VPCs in {region}")
     vpc_name_map = {
         vpc['VpcId']: next((tag['Value'] for tag in vpc.get('Tags', []) if tag['Key'] == 'Name'), '')
         for vpc in vpcs
@@ -47,42 +36,60 @@ def lambda_handler(event=None, context=None):
         traffic_bytes = 0
         is_referenced = False
 
+        # First check if metrics exist for this endpoint
         try:
-            print(f"   Fetching CloudWatch metrics for {ep_id}...")
-            metrics = cloudwatch.get_metric_statistics(
+            metrics_list = cloudwatch.list_metrics(
                 Namespace='AWS/PrivateLink',
-                MetricName='BytesProcessed',
-                Dimensions=[{'Name': 'VpcEndpointId', 'Value': ep_id}],
-                StartTime=start_time,
-                EndTime=end_time,
-                Period=period,
-                Statistics=['Sum']
+                Dimensions=[{'Name': 'VpcEndpointId', 'Value': ep_id}]
             )
-            for dp in metrics['Datapoints']:
-                traffic_bytes += dp['Sum']
-            print(f"   Metrics total: {traffic_bytes} bytes in last {days_to_check} days")
         except Exception as e:
-            print(f"   Error fetching metrics for {ep_id}: {e}")
+            print(f"  Error listing metrics for {ep_id}: {e}")
+            metrics_list = {'Metrics': []}
+
+        if not metrics_list['Metrics']:
+            print(f"  No CloudWatch metrics found for {ep_id} — skipping metrics fetch")
+        else:
+            try:
+                metrics = cloudwatch.get_metric_statistics(
+                    Namespace='AWS/PrivateLink',
+                    MetricName='BytesProcessed',
+                    Dimensions=[{'Name': 'VpcEndpointId', 'Value': ep_id}],
+                    StartTime=start_time,
+                    EndTime=end_time,
+                    Period=period,
+                    Statistics=['Sum']
+                )
+                for dp in metrics['Datapoints']:
+                    traffic_bytes += dp['Sum']
+                print(f"  Metrics total: {traffic_bytes} bytes in last {days_to_check} days")
+            except Exception as e:
+                print(f"  Error fetching metrics for {ep_id}: {e}")
 
         if ep_type == 'Gateway':
-            print(f"   Checking route table references for Gateway endpoint {ep_id}...")
-            for rt in ec2.describe_route_tables()['RouteTables']:
-                for route in rt.get('Routes', []):
-                    if route.get('GatewayId') == ep_id:
-                        is_referenced = True
-                        print(f"     Found reference in route table {rt['RouteTableId']}")
-                        break
+            print(f"  Checking route table references for Gateway endpoint {ep_id}...")
+            try:
+                for rt in ec2.describe_route_tables()['RouteTables']:
+                    for route in rt.get('Routes', []):
+                        if route.get('GatewayId') == ep_id:
+                            is_referenced = True
+                            print(f"    Found reference in route table {rt['RouteTableId']}")
+                            break
+            except Exception as e:
+                print(f"  Error checking route tables: {e}")
 
         elif ep_type == 'Interface':
-            print(f"   Checking ENI attachments for Interface endpoint {ep_id}...")
-            for eni in ep.get('NetworkInterfaceIds', []):
-                eni_data = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni])['NetworkInterfaces'][0]
-                if eni_data.get('Attachment'):
-                    is_referenced = True
-                    print(f"     ENI {eni} is attached to a resource")
+            print(f"  Checking ENI attachments for Interface endpoint {ep_id}...")
+            try:
+                for eni in ep.get('NetworkInterfaceIds', []):
+                    eni_data = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni])['NetworkInterfaces'][0]
+                    if eni_data.get('Attachment'):
+                        is_referenced = True
+                        print(f"    ENI {eni} is attached to a resource")
+            except Exception as e:
+                print(f"  Error checking ENIs: {e}")
 
         if traffic_bytes == 0 and not is_referenced:
-            print(f"   => Marking {ep_id} as UNUSED")
+            print(f"  => Marking {ep_id} as UNUSED")
             unused_endpoints.append({
                 'Region': region,
                 'VpcEndpointId': ep_id,
@@ -92,7 +99,7 @@ def lambda_handler(event=None, context=None):
                 'Service': ep_service
             })
         else:
-            print(f"   => {ep_id} still in use (traffic or reference found)")
+            print(f"  => {ep_id} still in use (traffic or reference found)")
 
     print("\n===== Scan complete =====")
     print(f"Total unused endpoints: {len(unused_endpoints)}")
@@ -100,3 +107,6 @@ def lambda_handler(event=None, context=None):
         print(ep)
 
     return unused_endpoints
+
+if __name__ == "__main__":
+    lambda_handler()
