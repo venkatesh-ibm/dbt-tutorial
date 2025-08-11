@@ -1,73 +1,42 @@
 import boto3
 import datetime
-import json
-import urllib.request
+import os
 
-def get_aws_ip_ranges(service_name):
-    url = "https://ip-ranges.amazonaws.com/ip-ranges.json"
-    with urllib.request.urlopen(url) as resp:
-        data = json.load(resp)
-    return [prefix['ip_prefix'] for prefix in data['prefixes'] if prefix['service'] == service_name]
-
-def check_flow_logs_for_service(log_group_name, service_prefixes, start_time, end_time):
-    logs = boto3.client('logs')
-    query = f"""
-        fields @timestamp, srcAddr, dstAddr, action
-        | filter action = 'ACCEPT' and ({' or '.join([f"dstAddr like '{p.split('/')[0]}'" for p in service_prefixes])})
-        | sort @timestamp desc
-        | limit 1
-    """
-    start_epoch = int(start_time.timestamp() * 1000)
-    end_epoch = int(end_time.timestamp() * 1000)
-
-    query_id = logs.start_query(
-        logGroupName=log_group_name,
-        startTime=start_epoch,
-        endTime=end_epoch,
-        queryString=query
-    )['queryId']
-
-    # Wait for query to complete
-    while True:
-        result = logs.get_query_results(queryId=query_id)
-        if result['status'] in ['Complete', 'Failed', 'Cancelled']:
-            break
-
-    return len(result.get('results', [])) > 0  # True if traffic found
-
-def lambda_handler(event, context):
-    days_to_check = 45
+def check_vpc_endpoints(regions_to_check=None, days_to_check=45, output_csv=False):
     end_time = datetime.datetime.utcnow()
     start_time = end_time - datetime.timedelta(days=days_to_check)
-    period = 86400
-
-    s3_prefixes = get_aws_ip_ranges("S3")
-
-    regions = [r['RegionName'] for r in boto3.client('ec2').describe_regions()['Regions']]
+    period = 86400  # 1 day
+    
+    # If no specific regions given, scan all
+    if not regions_to_check:
+        regions_to_check = [r['RegionName'] for r in boto3.client('ec2').describe_regions()['Regions']]
+    
     unused_endpoints = []
+    table_data = []
 
-    for region in regions:
+    for region in regions_to_check:
         ec2 = boto3.client('ec2', region_name=region)
         cloudwatch = boto3.client('cloudwatch', region_name=region)
 
-        endpoints = ec2.describe_vpc_endpoints()['VpcEndpoints']
+        try:
+            endpoints = ec2.describe_vpc_endpoints()['VpcEndpoints']
+        except Exception as e:
+            print(f"Error fetching endpoints in {region}: {e}")
+            continue
+        
+        # Map VPC IDs to Names
         vpcs = ec2.describe_vpcs()['Vpcs']
-        vpc_name_map = {
-            vpc['VpcId']: next((tag['Value'] for tag in vpc.get('Tags', []) if tag['Key'] == 'Name'), '')
-            for vpc in vpcs
-        }
+        vpc_name_map = {v['VpcId']: next((tag['Value'] for tag in v.get('Tags', []) if tag['Key'] == 'Name'), '') for v in vpcs}
 
         for ep in endpoints:
             ep_id = ep['VpcEndpointId']
-            vpc_id = ep['VpcId']
-            vpc_name = vpc_name_map.get(vpc_id, '')
             ep_type = ep['VpcEndpointType']
             ep_service = ep['ServiceName']
+            vpc_id = ep['VpcId']
+            vpc_name = vpc_name_map.get(vpc_id, '')
 
+            # 1. Check CloudWatch traffic
             traffic_bytes = 0
-            has_metrics = False
-
-            # Try CloudWatch metrics first (Interface endpoints)
             try:
                 metrics = cloudwatch.get_metric_statistics(
                     Namespace='AWS/PrivateLink',
@@ -80,33 +49,26 @@ def lambda_handler(event, context):
                 )
                 for dp in metrics['Datapoints']:
                     traffic_bytes += dp['Sum']
-                if metrics['Datapoints']:
-                    has_metrics = True
-            except:
-                pass
-
+            except Exception:
+                pass  # Some endpoints may not have metrics
+            
+            # 2. Check resource references
             is_referenced = False
-
             if ep_type == 'Gateway':
-                # Route table reference check
-                for rt in ec2.describe_route_tables()['RouteTables']:
+                route_tables = ec2.describe_route_tables()['RouteTables']
+                for rt in route_tables:
                     for route in rt.get('Routes', []):
                         if route.get('GatewayId') == ep_id:
                             is_referenced = True
-
-                # Fallback to VPC Flow Logs for S3
-                if not has_metrics and 's3' in ep_service.lower():
-                    # This assumes your VPC Flow Logs log group follows a known naming pattern
-                    log_group_name = f"/vpc/flowlogs/{vpc_id}"  # adjust for your env
-                    if check_flow_logs_for_service(log_group_name, s3_prefixes, start_time, end_time):
-                        traffic_bytes = 1  # simulate traffic found
+                            break
             elif ep_type == 'Interface':
-                # ENI attachment check
                 for eni in ep.get('NetworkInterfaceIds', []):
                     eni_data = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni])['NetworkInterfaces'][0]
                     if eni_data.get('Attachment'):
                         is_referenced = True
-
+                        break
+            
+            # 3. If no traffic & no references → mark unused
             if traffic_bytes == 0 and not is_referenced:
                 unused_endpoints.append({
                     'Region': region,
@@ -114,8 +76,47 @@ def lambda_handler(event, context):
                     'VpcId': vpc_id,
                     'VpcName': vpc_name,
                     'Type': ep_type,
-                    'Service': ep_service
+                    'Service': ep_service,
+                    'TrafficBytesLastDays': traffic_bytes,
+                    'Referenced': is_referenced
                 })
+                table_data.append([
+                    region, ep_id, vpc_id, vpc_name, ep_type, ep_service, int(traffic_bytes), is_referenced
+                ])
 
-    print(unused_endpoints)
-    return unused_endpoints
+    # Manual table print
+    if table_data:
+        headers = ["Region", "VpcEndpointId", "VpcId", "VpcName", "Type", "Service", f"TrafficBytes({days_to_check}d)", "Referenced"]
+        col_widths = [max(len(str(row[i])) for row in ([headers] + table_data)) for i in range(len(headers))]
+        header_row = " | ".join(str(headers[i]).ljust(col_widths[i]) for i in range(len(headers)))
+        print("\n" + header_row)
+        print("-" * len(header_row))
+        for row in table_data:
+            print(" | ".join(str(row[i]).ljust(col_widths[i]) for i in range(len(row))))
+
+        if output_csv:
+            import csv
+            filename = f"unused_vpc_endpoints_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            with open(filename, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                writer.writerows(table_data)
+            print(f"\nCSV report saved to {os.path.abspath(filename)}")
+    else:
+        print(f"\nNo unused endpoints found in the last {days_to_check} days.\n")
+    
+    return {
+        'UnusedVpcEndpoints': unused_endpoints,
+        'Count': len(unused_endpoints)
+    }
+
+
+# Lambda entry point
+def lambda_handler(event, context):
+    return check_vpc_endpoints()
+
+
+# Local/EC2 test entry point
+if __name__ == "__main__":
+    # Example: run for only 'us-east-1' and save CSV
+    check_vpc_endpoints(regions_to_check=['us-east-1'], days_to_check=45, output_csv=True)
