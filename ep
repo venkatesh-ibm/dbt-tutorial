@@ -8,14 +8,26 @@ def lambda_handler(event=None, context=None):
     period = 86400  # daily
 
     region = "eu-west-1"
-    print(f"=== Processing region: {region} ===")
+    print(f"=== Connecting to EC2 in {region} ===")
     ec2 = boto3.client('ec2', region_name=region)
     cloudwatch = boto3.client('cloudwatch', region_name=region)
 
-    endpoints = ec2.describe_vpc_endpoints()['VpcEndpoints'][:3]  # limit to 3 endpoints
-    print(f"Found {len(endpoints)} endpoints in {region} (limited to 3 for test)")
+    print("Fetching VPC endpoints...")
+    try:
+        endpoints = ec2.describe_vpc_endpoints()
+        print(f"Raw describe_vpc_endpoints() response count: {len(endpoints.get('VpcEndpoints', []))}")
+    except Exception as e:
+        print(f"Error fetching endpoints: {e}")
+        return
 
+    endpoints = endpoints.get('VpcEndpoints', [])[:3]
+    if not endpoints:
+        print(f"No VPC endpoints found in {region}. Exiting.")
+        return
+
+    print("Fetching VPC list...")
     vpcs = ec2.describe_vpcs()['Vpcs']
+    print(f"Found {len(vpcs)} VPCs in {region}")
     vpc_name_map = {
         vpc['VpcId']: next((tag['Value'] for tag in vpc.get('Tags', []) if tag['Key'] == 'Name'), '')
         for vpc in vpcs
