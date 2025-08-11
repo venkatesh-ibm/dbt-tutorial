@@ -1,0 +1,121 @@
+import boto3
+import datetime
+import json
+import urllib.request
+
+def get_aws_ip_ranges(service_name):
+    url = "https://ip-ranges.amazonaws.com/ip-ranges.json"
+    with urllib.request.urlopen(url) as resp:
+        data = json.load(resp)
+    return [prefix['ip_prefix'] for prefix in data['prefixes'] if prefix['service'] == service_name]
+
+def check_flow_logs_for_service(log_group_name, service_prefixes, start_time, end_time):
+    logs = boto3.client('logs')
+    query = f"""
+        fields @timestamp, srcAddr, dstAddr, action
+        | filter action = 'ACCEPT' and ({' or '.join([f"dstAddr like '{p.split('/')[0]}'" for p in service_prefixes])})
+        | sort @timestamp desc
+        | limit 1
+    """
+    start_epoch = int(start_time.timestamp() * 1000)
+    end_epoch = int(end_time.timestamp() * 1000)
+
+    query_id = logs.start_query(
+        logGroupName=log_group_name,
+        startTime=start_epoch,
+        endTime=end_epoch,
+        queryString=query
+    )['queryId']
+
+    # Wait for query to complete
+    while True:
+        result = logs.get_query_results(queryId=query_id)
+        if result['status'] in ['Complete', 'Failed', 'Cancelled']:
+            break
+
+    return len(result.get('results', [])) > 0  # True if traffic found
+
+def lambda_handler(event, context):
+    days_to_check = 45
+    end_time = datetime.datetime.utcnow()
+    start_time = end_time - datetime.timedelta(days=days_to_check)
+    period = 86400
+
+    s3_prefixes = get_aws_ip_ranges("S3")
+
+    regions = [r['RegionName'] for r in boto3.client('ec2').describe_regions()['Regions']]
+    unused_endpoints = []
+
+    for region in regions:
+        ec2 = boto3.client('ec2', region_name=region)
+        cloudwatch = boto3.client('cloudwatch', region_name=region)
+
+        endpoints = ec2.describe_vpc_endpoints()['VpcEndpoints']
+        vpcs = ec2.describe_vpcs()['Vpcs']
+        vpc_name_map = {
+            vpc['VpcId']: next((tag['Value'] for tag in vpc.get('Tags', []) if tag['Key'] == 'Name'), '')
+            for vpc in vpcs
+        }
+
+        for ep in endpoints:
+            ep_id = ep['VpcEndpointId']
+            vpc_id = ep['VpcId']
+            vpc_name = vpc_name_map.get(vpc_id, '')
+            ep_type = ep['VpcEndpointType']
+            ep_service = ep['ServiceName']
+
+            traffic_bytes = 0
+            has_metrics = False
+
+            # Try CloudWatch metrics first (Interface endpoints)
+            try:
+                metrics = cloudwatch.get_metric_statistics(
+                    Namespace='AWS/PrivateLink',
+                    MetricName='BytesProcessed',
+                    Dimensions=[{'Name': 'VpcEndpointId', 'Value': ep_id}],
+                    StartTime=start_time,
+                    EndTime=end_time,
+                    Period=period,
+                    Statistics=['Sum']
+                )
+                for dp in metrics['Datapoints']:
+                    traffic_bytes += dp['Sum']
+                if metrics['Datapoints']:
+                    has_metrics = True
+            except:
+                pass
+
+            is_referenced = False
+
+            if ep_type == 'Gateway':
+                # Route table reference check
+                for rt in ec2.describe_route_tables()['RouteTables']:
+                    for route in rt.get('Routes', []):
+                        if route.get('GatewayId') == ep_id:
+                            is_referenced = True
+
+                # Fallback to VPC Flow Logs for S3
+                if not has_metrics and 's3' in ep_service.lower():
+                    # This assumes your VPC Flow Logs log group follows a known naming pattern
+                    log_group_name = f"/vpc/flowlogs/{vpc_id}"  # adjust for your env
+                    if check_flow_logs_for_service(log_group_name, s3_prefixes, start_time, end_time):
+                        traffic_bytes = 1  # simulate traffic found
+            elif ep_type == 'Interface':
+                # ENI attachment check
+                for eni in ep.get('NetworkInterfaceIds', []):
+                    eni_data = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni])['NetworkInterfaces'][0]
+                    if eni_data.get('Attachment'):
+                        is_referenced = True
+
+            if traffic_bytes == 0 and not is_referenced:
+                unused_endpoints.append({
+                    'Region': region,
+                    'VpcEndpointId': ep_id,
+                    'VpcId': vpc_id,
+                    'VpcName': vpc_name,
+                    'Type': ep_type,
+                    'Service': ep_service
+                })
+
+    print(unused_endpoints)
+    return unused_endpoints
