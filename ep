@@ -1,127 +1,111 @@
 import boto3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 REGION = "eu-west-1"
 DAYS = 45
 
-ec2 = boto3.client("ec2", region_name=REGION)
-cw = boto3.client("cloudwatch", region_name=REGION)
+def get_vpc_name(ec2_client, vpc_id):
+    vpcs = ec2_client.describe_vpcs(VpcIds=[vpc_id])["Vpcs"]
+    if vpcs and "Tags" in vpcs[0]:
+        for tag in vpcs[0]["Tags"]:
+            if tag["Key"] == "Name":
+                return tag["Value"]
+    return ""
 
-def format_bytes(num_bytes):
-    """Convert bytes to human-readable MB/GB."""
-    if isinstance(num_bytes, str):
-        return num_bytes  # for N/A text
-    if num_bytes >= 1024**3:
-        return f"{num_bytes / (1024**3):.2f} GB"
-    elif num_bytes >= 1024**2:
-        return f"{num_bytes / (1024**2):.2f} MB"
-    elif num_bytes >= 1024:
-        return f"{num_bytes / 1024:.2f} KB"
-    else:
-        return f"{num_bytes} B"
+def get_bytes_processed(cw_client, vpce_id):
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(days=DAYS)
 
-def get_vpc_names():
-    """Return dict of VPC ID → Name."""
-    vpc_map = {}
-    vpcs = ec2.describe_vpcs()["Vpcs"]
-    for vpc in vpcs:
-        vpc_id = vpc["VpcId"]
-        name_tag = next((t["Value"] for t in vpc.get("Tags", []) if t["Key"] == "Name"), "")
-        vpc_map[vpc_id] = name_tag
-    return vpc_map
-
-def get_cloudwatch_bytes(vpce_id):
-    """Return total BytesProcessed metric for endpoint or None if no metric."""
-    start = datetime.utcnow() - timedelta(days=DAYS)
-    end = datetime.utcnow()
-
-    resp = cw.get_metric_statistics(
+    # Get full dimensions from list_metrics
+    metrics = cw_client.list_metrics(
         Namespace="AWS/PrivateLinkEndpoints",
         MetricName="BytesProcessed",
-        Dimensions=[{"Name": "VpcEndpointId", "Value": vpce_id}],
-        StartTime=start,
-        EndTime=end,
-        Period=86400,  # 1 day
+        Dimensions=[{"Name": "VpcEndpointId", "Value": vpce_id}]
+    ).get("Metrics", [])
+
+    if not metrics:
+        return None  # No metric at all
+
+    # Use first metric's dimensions exactly
+    metric_dims = metrics[0]["Dimensions"]
+
+    stats = cw_client.get_metric_statistics(
+        Namespace="AWS/PrivateLinkEndpoints",
+        MetricName="BytesProcessed",
+        Dimensions=metric_dims,
+        StartTime=start_time,
+        EndTime=end_time,
+        Period=86400,
         Statistics=["Sum"]
     )
 
-    if not resp["Datapoints"]:
-        return None
-    return sum(dp["Sum"] for dp in resp["Datapoints"])
+    datapoints = stats.get("Datapoints", [])
+    if not datapoints:
+        return 0  # Metric exists but zero usage
 
-def get_flow_log_map():
-    """Return dict of VPC IDs with flow logs enabled."""
-    fl_map = {}
-    for vpc in ec2.describe_vpcs()["Vpcs"]:
-        fl_map[vpc["VpcId"]] = False
-    for fl in ec2.describe_flow_logs()["FlowLogs"]:
-        if fl.get("ResourceType") == "VPC":
-            fl_map[fl.get("ResourceId")] = True
-    return fl_map
+    total_bytes = sum(dp["Sum"] for dp in datapoints)
+    return total_bytes
 
-def get_endpoint_attachments(vpce):
-    """Return comma-separated list of attachment resources."""
-    attachments = []
-    for assoc in vpce.get("NetworkInterfaceIds", []):
-        attachments.append(f"ENI:{assoc}")
-    for rt in vpce.get("RouteTableIds", []):
-        attachments.append(f"RTB:{rt}")
-    return ", ".join(attachments) if attachments else "-"
+def flow_logs_enabled(ec2_client, vpc_id):
+    logs = ec2_client.describe_flow_logs(
+        Filters=[{"Name": "resource-id", "Values": [vpc_id]}]
+    ).get("FlowLogs", [])
+    return bool(logs)
+
+def convert_bytes(size_bytes):
+    if size_bytes is None:
+        return "N/A"
+    if size_bytes == 0:
+        return "0 B"
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size_bytes < 1024:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024
 
 def main():
-    vpc_names = get_vpc_names()
-    flow_logs = get_flow_log_map()
+    ec2_client = boto3.client("ec2", region_name=REGION)
+    cw_client = boto3.client("cloudwatch", region_name=REGION)
 
-    results = []
-    endpoints = ec2.describe_vpc_endpoints()["VpcEndpoints"]
+    endpoints = ec2_client.describe_vpc_endpoints()["VpcEndpoints"]
+    report = []
 
-    total_eps = len(endpoints)
-    print(f"Found {total_eps} VPC endpoints in {REGION}. Checking usage for last {DAYS} days...\n")
+    for ep in endpoints:
+        print(f"Checking endpoint {ep['VpcEndpointId']}...")
 
-    for idx, ep in enumerate(endpoints, start=1):
         vpc_id = ep["VpcId"]
-        vpce_id = ep["VpcEndpointId"]
+        vpc_name = get_vpc_name(ec2_client, vpc_id)
         service_name = ep["ServiceName"]
-        vpc_name = vpc_names.get(vpc_id, "")
-        attachments = get_endpoint_attachments(ep)
 
-        print(f"[{idx}/{total_eps}] Checking endpoint {vpce_id} ({service_name}) in VPC {vpc_id}...")
+        bytes_processed = get_bytes_processed(cw_client, ep["VpcEndpointId"])
 
-        total_bytes = get_cloudwatch_bytes(vpce_id)
-
-        if total_bytes is None:  # Only check flow logs if metric is missing
-            if flow_logs.get(vpc_id):
-                total_bytes = "0 Bytes (Flow logs enabled)"
+        if bytes_processed is None:
+            # No metric at all → check flow logs
+            if flow_logs_enabled(ec2_client, vpc_id):
+                usage_str = "N/A (Flow logs enabled, no metric)"
             else:
-                total_bytes = "N/A (Flow logs not enabled)"
+                usage_str = "N/A (Flow logs not enabled)"
+            bytes_sort_val = 0
+        else:
+            usage_str = convert_bytes(bytes_processed)
+            bytes_sort_val = bytes_processed
 
-        results.append({
-            "VpcId": vpc_id,
+        report.append({
             "VpcName": vpc_name,
-            "EndpointId": vpce_id,
+            "VpcId": vpc_id,
+            "EndpointId": ep["VpcEndpointId"],
             "ServiceName": service_name,
-            "BytesProcessed": total_bytes,
-            "Attachments": attachments
+            "Usage": usage_str,
+            "BytesSortVal": bytes_sort_val
         })
 
-    # Sort: treat N/A as 0 bytes
-    def sort_key(item):
-        val = item["BytesProcessed"]
-        if isinstance(val, str):
-            if val.startswith("N/A"):
-                return -1  # Appear first
-            if val.startswith("0 Bytes"):
-                return 0
-            return -1
-        return val
+    # Sort by usage ascending (treat N/A as 0)
+    report.sort(key=lambda x: x["BytesSortVal"])
 
-    results.sort(key=sort_key)
-
-    print("\n--- VPC Endpoint Usage Report ---")
-    print(f"{'VPC ID':<15} {'VPC Name':<20} {'Endpoint ID':<25} {'Service Name':<45} {'Bytes Processed':<30} {'Attachments'}")
-    print("-" * 150)
-    for r in results:
-        print(f"{r['VpcId']:<15} {r['VpcName']:<20} {r['EndpointId']:<25} {r['ServiceName']:<45} {format_bytes(r['BytesProcessed']):<30} {r['Attachments']}")
+    # Print table
+    print(f"\n{'VPC Name':<20} {'VPC ID':<15} {'Endpoint ID':<20} {'Service Name':<40} {'Usage':<25}")
+    print("-" * 130)
+    for r in report:
+        print(f"{r['VpcName']:<20} {r['VpcId']:<15} {r['EndpointId']:<20} {r['ServiceName']:<40} {r['Usage']:<25}")
 
 if __name__ == "__main__":
     main()
