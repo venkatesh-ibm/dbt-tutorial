@@ -1,9 +1,84 @@
-aws cloudwatch get-metric-statistics \
-    --namespace AWS/PrivateLinkEndpoints \
-    --metric-name BytesProcessed \
-    --dimensions Name=VpcEndpointId,Value=vpce-xxxxxxxxxxxxxxxxx \
-    --start-time 2024-06-28T00:00:00Z \
-    --end-time 2024-08-12T00:00:00Z \
-    --period 86400 \
-    --statistics Sum \
-    --region eu-west-1
+import boto3
+from datetime import datetime, timedelta, timezone
+from tabulate import tabulate
+
+# Config
+REGION = "eu-west-1"
+DAYS = 45
+METRIC_NAME = "BytesProcessed"
+NAMESPACE = "AWS/PrivateLinkEndpoints"
+
+# Initialize boto3 clients
+ec2 = boto3.client("ec2", region_name=REGION)
+cw = boto3.client("cloudwatch", region_name=REGION)
+
+# Time range
+end_time = datetime.now(timezone.utc)
+start_time = end_time - timedelta(days=DAYS)
+
+def get_vpc_name(vpc_id):
+    """Get VPC Name tag if available."""
+    vpcs = ec2.describe_vpcs(VpcIds=[vpc_id]).get("Vpcs", [])
+    if vpcs:
+        tags = {t["Key"]: t["Value"] for t in vpcs[0].get("Tags", [])}
+        return tags.get("Name", "")
+    return ""
+
+def get_endpoint_metrics(vpce_id):
+    """Find all matching BytesProcessed metrics for a VPC endpoint."""
+    metrics = cw.list_metrics(
+        Namespace=NAMESPACE,
+        MetricName=METRIC_NAME
+    )["Metrics"]
+
+    return [m for m in metrics if any(d["Value"] == vpce_id for d in m["Dimensions"])]
+
+def get_sum_bytes_for_metric(metric):
+    """Query CloudWatch for sum of BytesProcessed for given metric dimensions."""
+    response = cw.get_metric_statistics(
+        Namespace=metric["Namespace"],
+        MetricName=metric["MetricName"],
+        Dimensions=metric["Dimensions"],
+        StartTime=start_time,
+        EndTime=end_time,
+        Period=86400,  # 1 day
+        Statistics=["Sum"]
+    )
+    return sum(dp["Sum"] for dp in response.get("Datapoints", []))
+
+def main():
+    endpoints = ec2.describe_vpc_endpoints()["VpcEndpoints"]
+    table_data = []
+
+    print(f"Checking {len(endpoints)} endpoints in {REGION} for last {DAYS} days...")
+
+    for ep in endpoints:
+        vpc_id = ep["VpcId"]
+        vpce_id = ep["VpcEndpointId"]
+        service_name = ep["ServiceName"]
+        vpc_name = get_vpc_name(vpc_id)
+
+        print(f"→ Fetching metrics for {vpce_id} ({service_name})...")
+        metrics = get_endpoint_metrics(vpce_id)
+
+        total_bytes = 0
+        for metric in metrics:
+            total_bytes += get_sum_bytes_for_metric(metric)
+
+        table_data.append([
+            vpc_id,
+            vpc_name,
+            vpce_id,
+            service_name,
+            total_bytes
+        ])
+
+    print("\nVPC Endpoint Usage Report:")
+    print(tabulate(
+        table_data,
+        headers=["VPC ID", "VPC Name", "VPC Endpoint ID", "Service Name", "Bytes Processed"],
+        tablefmt="pretty"
+    ))
+
+if __name__ == "__main__":
+    main()
