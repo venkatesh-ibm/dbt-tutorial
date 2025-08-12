@@ -1,154 +1,122 @@
 import boto3
-import datetime
-import time
+from datetime import datetime, timedelta
 
 REGION = "eu-west-1"
-DAYS_TO_CHECK = 45
+DAYS = 45
 
 ec2 = boto3.client("ec2", region_name=REGION)
 cw = boto3.client("cloudwatch", region_name=REGION)
-logs = boto3.client("logs", region_name=REGION)
 
-def bytes_to_human_readable(num_bytes):
-    if num_bytes is None:
-        return "N/A"
-    if num_bytes < 1024:
-        return f"{num_bytes} B"
-    elif num_bytes < 1024**2:
-        return f"{num_bytes/1024:.2f} KB"
-    elif num_bytes < 1024**3:
-        return f"{num_bytes/1024**2:.2f} MB"
+def format_bytes(num_bytes):
+    """Convert bytes to human-readable MB/GB."""
+    if isinstance(num_bytes, str):
+        return num_bytes  # for N/A text
+    if num_bytes >= 1024**3:
+        return f"{num_bytes / (1024**3):.2f} GB"
+    elif num_bytes >= 1024**2:
+        return f"{num_bytes / (1024**2):.2f} MB"
+    elif num_bytes >= 1024:
+        return f"{num_bytes / 1024:.2f} KB"
     else:
-        return f"{num_bytes/1024**3:.2f} GB"
+        return f"{num_bytes} B"
 
 def get_vpc_names():
+    """Return dict of VPC ID → Name."""
     vpc_map = {}
     vpcs = ec2.describe_vpcs()["Vpcs"]
     for vpc in vpcs:
-        name = next((t["Value"] for t in vpc.get("Tags", []) if t["Key"] == "Name"), "")
-        vpc_map[vpc["VpcId"]] = name
+        vpc_id = vpc["VpcId"]
+        name_tag = next((t["Value"] for t in vpc.get("Tags", []) if t["Key"] == "Name"), "")
+        vpc_map[vpc_id] = name_tag
     return vpc_map
 
+def get_cloudwatch_bytes(vpce_id):
+    """Return total BytesProcessed metric for endpoint or None if no metric."""
+    start = datetime.utcnow() - timedelta(days=DAYS)
+    end = datetime.utcnow()
+
+    resp = cw.get_metric_statistics(
+        Namespace="AWS/PrivateLinkEndpoints",
+        MetricName="BytesProcessed",
+        Dimensions=[{"Name": "VpcEndpointId", "Value": vpce_id}],
+        StartTime=start,
+        EndTime=end,
+        Period=86400,  # 1 day
+        Statistics=["Sum"]
+    )
+
+    if not resp["Datapoints"]:
+        return None
+    return sum(dp["Sum"] for dp in resp["Datapoints"])
+
 def get_flow_log_map():
-    """Return dict of VPC IDs that have flow logs enabled."""
+    """Return dict of VPC IDs with flow logs enabled."""
     fl_map = {}
-    vpcs = ec2.describe_vpcs()["Vpcs"]
-    for vpc in vpcs:
-        fl_map[vpc["VpcId"]] = False  # default
-    flow_logs = ec2.describe_flow_logs()["FlowLogs"]
-    for fl in flow_logs:
-        if fl["ResourceType"] == "VPC":
-            fl_map[fl["ResourceId"]] = True
+    for vpc in ec2.describe_vpcs()["Vpcs"]:
+        fl_map[vpc["VpcId"]] = False
+    for fl in ec2.describe_flow_logs()["FlowLogs"]:
+        if fl.get("ResourceType") == "VPC":
+            fl_map[fl.get("ResourceId")] = True
     return fl_map
 
-def get_cloudwatch_bytes(endpoint_id):
-    end_time = datetime.datetime.utcnow()
-    start_time = end_time - datetime.timedelta(days=DAYS_TO_CHECK)
-    try:
-        resp = cw.get_metric_statistics(
-            Namespace="AWS/PrivateLinkEndpoints",
-            MetricName="BytesProcessed",
-            Dimensions=[
-                {"Name": "VpcEndpointId", "Value": endpoint_id}
-            ],
-            StartTime=start_time,
-            EndTime=end_time,
-            Period=86400,
-            Statistics=["Sum"]
-        )
-        if not resp["Datapoints"]:
-            return None
-        return sum(dp["Sum"] for dp in resp["Datapoints"])
-    except Exception as e:
-        print(f"Error fetching CW metrics for {endpoint_id}: {e}")
-        return None
+def get_endpoint_attachments(vpce):
+    """Return comma-separated list of attachment resources."""
+    attachments = []
+    for assoc in vpce.get("NetworkInterfaceIds", []):
+        attachments.append(f"ENI:{assoc}")
+    for rt in vpce.get("RouteTableIds", []):
+        attachments.append(f"RTB:{rt}")
+    return ", ".join(attachments) if attachments else "-"
 
-def get_flow_log_bytes(eni_ids):
-    """Query CloudWatch Logs Insights for total bytes from ENIs."""
-    if not eni_ids:
-        return None
-    start_query = logs.start_query(
-        logGroupName="diagnosticflowlogs",
-        startTime=int((datetime.datetime.utcnow() - datetime.timedelta(days=DAYS_TO_CHECK)).timestamp()),
-        endTime=int(datetime.datetime.utcnow().timestamp()),
-        queryString=f"""
-            fields interfaceId, bytes
-            | filter interfaceId in {eni_ids}
-            | stats sum(bytes) as totalBytes
-        """
-    )
-    query_id = start_query["queryId"]
-
-    while True:
-        resp = logs.get_query_results(queryId=query_id)
-        if resp["status"] in ["Complete", "Failed", "Cancelled"]:
-            break
-        time.sleep(2)
-
-    if resp["status"] != "Complete" or not resp["results"]:
-        return None
-
-    try:
-        return int(resp["results"][0][0]["value"])
-    except (IndexError, ValueError, KeyError):
-        return None
-
-def get_attachment_details(endpoint):
-    details = []
-    if endpoint.get("NetworkInterfaceIds"):
-        details.extend([f"ENI:{eni}" for eni in endpoint["NetworkInterfaceIds"]])
-    if endpoint.get("RouteTableIds"):
-        details.extend([f"RTB:{rtb}" for rtb in endpoint["RouteTableIds"]])
-    return ", ".join(details) if details else "No attachments"
-
-def lambda_handler(event=None, context=None):
+def main():
     vpc_names = get_vpc_names()
-    flow_log_map = get_flow_log_map()
+    flow_logs = get_flow_log_map()
 
+    results = []
     endpoints = ec2.describe_vpc_endpoints()["VpcEndpoints"]
 
-    table = []
     for ep in endpoints:
         vpc_id = ep["VpcId"]
-        vpc_name = vpc_names.get(vpc_id, "")
+        vpce_id = ep["VpcEndpointId"]
         service_name = ep["ServiceName"]
-        endpoint_id = ep["VpcEndpointId"]
+        vpc_name = vpc_names.get(vpc_id, "")
+        attachments = get_endpoint_attachments(ep)
 
-        # Step 1: CloudWatch metric
-        bytes_processed = get_cloudwatch_bytes(endpoint_id)
+        total_bytes = get_cloudwatch_bytes(vpce_id)
 
-        # Step 2: Fallback to flow logs if needed
-        if bytes_processed is None:
-            if flow_log_map.get(vpc_id):
-                # collect ENIs for this endpoint
-                eni_ids = ep.get("NetworkInterfaceIds", [])
-                bytes_processed = get_flow_log_bytes(eni_ids)
-                if bytes_processed is None:
-                    human_readable = "0 Bytes (from flow logs)"
-                    usage_status = "Likely Unused"
-                else:
-                    human_readable = bytes_to_human_readable(bytes_processed)
-                    usage_status = "Active" if bytes_processed > 0 else "Likely Unused"
+        if total_bytes is None:  # Only check flow logs if metric is missing
+            if flow_logs.get(vpc_id):
+                total_bytes = "0 Bytes (Flow logs enabled)"
             else:
-                human_readable = "N/A (Flow logs not enabled)"
-                usage_status = "Unknown (Flow logs disabled)"
-        else:
-            human_readable = bytes_to_human_readable(bytes_processed)
-            usage_status = "Active" if bytes_processed > 0 else "Likely Unused"
+                total_bytes = "N/A (Flow logs not enabled)"
 
-        attachments = get_attachment_details(ep)
+        results.append({
+            "VpcId": vpc_id,
+            "VpcName": vpc_name,
+            "EndpointId": vpce_id,
+            "ServiceName": service_name,
+            "BytesProcessed": total_bytes,
+            "Attachments": attachments
+        })
 
-        table.append([
-            vpc_id, vpc_name, endpoint_id, service_name,
-            human_readable, attachments, usage_status
-        ])
+    # Sort: treat N/A as 0 bytes
+    def sort_key(item):
+        val = item["BytesProcessed"]
+        if isinstance(val, str):
+            if val.startswith("N/A"):
+                return -1  # Appear first
+            if val.startswith("0 Bytes"):
+                return 0
+            return -1
+        return val
 
-    # Print header
-    header = ["VPC ID", "VPC Name", "Endpoint ID", "Service Name",
-              "Bytes Processed", "Attachment Details", "Usage Status"]
-    print("\t".join(header))
-    for row in table:
-        print("\t".join(str(cell) for cell in row))
+    results.sort(key=sort_key)
+
+    # Print table
+    print(f"{'VPC ID':<15} {'VPC Name':<20} {'Endpoint ID':<25} {'Service Name':<45} {'Bytes Processed':<30} {'Attachments'}")
+    print("-" * 150)
+    for r in results:
+        print(f"{r['VpcId']:<15} {r['VpcName']:<20} {r['EndpointId']:<25} {r['ServiceName']:<45} {format_bytes(r['BytesProcessed']):<30} {r['Attachments']}")
 
 if __name__ == "__main__":
-    lambda_handler()
+    main()
