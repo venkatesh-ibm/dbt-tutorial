@@ -75,12 +75,17 @@ def main():
     results = []
     endpoints = ec2.describe_vpc_endpoints()["VpcEndpoints"]
 
-    for ep in endpoints:
+    total_eps = len(endpoints)
+    print(f"Found {total_eps} VPC endpoints in {REGION}. Checking usage for last {DAYS} days...\n")
+
+    for idx, ep in enumerate(endpoints, start=1):
         vpc_id = ep["VpcId"]
         vpce_id = ep["VpcEndpointId"]
         service_name = ep["ServiceName"]
         vpc_name = vpc_names.get(vpc_id, "")
         attachments = get_endpoint_attachments(ep)
+
+        print(f"[{idx}/{total_eps}] Checking endpoint {vpce_id} ({service_name}) in VPC {vpc_id}...")
 
         total_bytes = get_cloudwatch_bytes(vpce_id)
 
@@ -112,7 +117,7 @@ def main():
 
     results.sort(key=sort_key)
 
-    # Print table
+    print("\n--- VPC Endpoint Usage Report ---")
     print(f"{'VPC ID':<15} {'VPC Name':<20} {'Endpoint ID':<25} {'Service Name':<45} {'Bytes Processed':<30} {'Attachments'}")
     print("-" * 150)
     for r in results:
