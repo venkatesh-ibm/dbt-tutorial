@@ -45,27 +45,62 @@ def get_sum_bytes_for_metric(metric):
     )
     return sum(dp["Sum"] for dp in response.get("Datapoints", []))
 
+def format_bytes(num_bytes):
+    """Convert bytes into human-readable KB/MB/GB."""
+    if num_bytes >= 1024**3:
+        return f"{num_bytes / (1024**3):.2f} GB"
+    elif num_bytes >= 1024**2:
+        return f"{num_bytes / (1024**2):.2f} MB"
+    elif num_bytes >= 1024:
+        return f"{num_bytes / 1024:.2f} KB"
+    else:
+        return f"{num_bytes} B"
+
+def get_attachment_info(endpoint):
+    """Check where the VPC endpoint is attached."""
+    attachment_list = []
+    attached = False
+
+    if endpoint["VpcEndpointType"].lower() == "gateway":
+        # Gateway endpoints attach via Route Tables
+        rtb_ids = endpoint.get("RouteTableIds", [])
+        if rtb_ids:
+            attached = True
+            attachment_list = [f"RTB:{rtb}" for rtb in rtb_ids]
+
+    elif endpoint["VpcEndpointType"].lower() == "interface":
+        # Interface endpoints attach via Network Interfaces
+        ni_ids = endpoint.get("NetworkInterfaceIds", [])
+        if ni_ids:
+            attached = True
+            attachment_list = [f"ENI:{eni}" for eni in ni_ids]
+
+    return attached, ", ".join(attachment_list) if attachment_list else "-"
+
 def main():
     endpoints = ec2.describe_vpc_endpoints()["VpcEndpoints"]
 
     # Print header
-    print(f"{'VPC ID':<15} {'VPC Name':<20} {'VPC Endpoint ID':<25} {'Service Name':<50} {'Bytes Processed':<15}")
-    print("-" * 130)
+    print(f"{'VPC ID':<15} {'VPC Name':<20} {'VPC Endpoint ID':<25} {'Service Name':<50} {'Bytes Processed':<15} {'Attached?':<10} {'Attachment Info'}")
+    print("-" * 170)
 
-    for ep in endpoints:
+    for idx, ep in enumerate(endpoints, start=1):
         vpc_id = ep["VpcId"]
         vpce_id = ep["VpcEndpointId"]
         service_name = ep["ServiceName"]
         vpc_name = get_vpc_name(vpc_id)
 
-        print(f"Fetching metrics for {vpce_id} ({service_name})...")
+        print(f"[{idx}/{len(endpoints)}] Processing {vpce_id} ({service_name})...")
+
         metrics = get_endpoint_metrics(vpce_id)
 
         total_bytes = 0
         for metric in metrics:
             total_bytes += get_sum_bytes_for_metric(metric)
 
-        print(f"{vpc_id:<15} {vpc_name:<20} {vpce_id:<25} {service_name:<50} {total_bytes:<15}")
+        attached, attach_info = get_attachment_info(ep)
+
+        print(f"{vpc_id:<15} {vpc_name:<20} {vpce_id:<25} {service_name:<50} {format_bytes(total_bytes):<15} {('Yes' if attached else 'No'):<10} {attach_info}")
 
 if __name__ == "__main__":
     main()
