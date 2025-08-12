@@ -1,6 +1,5 @@
 import boto3
 from datetime import datetime, timedelta, timezone
-from tabulate import tabulate
 
 # Config
 REGION = "eu-west-1"
@@ -48,9 +47,10 @@ def get_sum_bytes_for_metric(metric):
 
 def main():
     endpoints = ec2.describe_vpc_endpoints()["VpcEndpoints"]
-    table_data = []
 
-    print(f"Checking {len(endpoints)} endpoints in {REGION} for last {DAYS} days...")
+    # Print header
+    print(f"{'VPC ID':<15} {'VPC Name':<20} {'VPC Endpoint ID':<25} {'Service Name':<50} {'Bytes Processed':<15}")
+    print("-" * 130)
 
     for ep in endpoints:
         vpc_id = ep["VpcId"]
@@ -58,27 +58,14 @@ def main():
         service_name = ep["ServiceName"]
         vpc_name = get_vpc_name(vpc_id)
 
-        print(f"→ Fetching metrics for {vpce_id} ({service_name})...")
+        print(f"Fetching metrics for {vpce_id} ({service_name})...")
         metrics = get_endpoint_metrics(vpce_id)
 
         total_bytes = 0
         for metric in metrics:
             total_bytes += get_sum_bytes_for_metric(metric)
 
-        table_data.append([
-            vpc_id,
-            vpc_name,
-            vpce_id,
-            service_name,
-            total_bytes
-        ])
-
-    print("\nVPC Endpoint Usage Report:")
-    print(tabulate(
-        table_data,
-        headers=["VPC ID", "VPC Name", "VPC Endpoint ID", "Service Name", "Bytes Processed"],
-        tablefmt="pretty"
-    ))
+        print(f"{vpc_id:<15} {vpc_name:<20} {vpce_id:<25} {service_name:<50} {total_bytes:<15}")
 
 if __name__ == "__main__":
     main()
